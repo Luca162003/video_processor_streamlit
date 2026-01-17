@@ -12,24 +12,23 @@ from pathlib import Path
 from collections import defaultdict
 from ultralytics import YOLO
 
-if not torch.cuda.is_available():
-    st.warning("⚠️ ATTENZIONE: GPU non rilevata! L'elaborazione sarà molto lenta (CPU).")
-else:
-    st.success(f"✅ GPU Rilevata: {torch.cuda.get_device_name(0)}")
+st.set_page_config(page_title="AI-powered Murine Polyp Analysis", layout="wide", page_icon=':mouse:')
 
-st.set_page_config(page_title="AI-powered Murine Polyp Analysis", layout="wide")
+# --- GESTIONE STATO SESSIONE (Fondamentale per il download) ---
+if 'processed' not in st.session_state:
+    st.session_state['processed'] = False
+if 'results' not in st.session_state:
+    st.session_state['results'] = {}
 
-# Parametri di Default (in futuro potrebbero essere resi configurabili)
+# Parametri di Default
 DEFAULT_CONF = 0.5
 DEFAULT_IOU = 0.5
-IMG_SIZE = 640
+IMG_SIZE = 640 # O 352 se vuoi velocità
 MIN_TRACK_FRAMES = 5
 TRACK_BUFFER = 10
 MATCH_THRESH = 0.85
 
-
 def create_compatible_tracker_config():
-    """Crea il file di configurazione YAML per il Bytetracker."""
     tracker_config = {
         'tracker_type': 'bytetrack',
         'track_high_thresh': 0.5,
@@ -43,15 +42,12 @@ def create_compatible_tracker_config():
         'appearance_thresh': 0.25,
         'with_reid': False
     }
-    
-    # Salviamo in un file temporaneo per evitare conflitti
     tfile = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
     yaml.dump(tracker_config, tfile)
     tfile.close()
     return tfile.name
 
 def get_tumor_score_advanced(mask_poly, img_shape):
-    """Calcola lo score tumorale basato sulle dimensioni relative."""
     if len(mask_poly) < 3: return 0, 0.0
     pts = np.array(mask_poly, dtype=np.int32)
     area_pixels = cv2.contourArea(pts)
@@ -71,12 +67,9 @@ def get_tumor_score_advanced(mask_poly, img_shape):
     return score, r
 
 def draw_inference_overlay(img, detections, valid_ids, display_id_map):
-    """Disegna le box e le annotazioni sul frame."""
     frame_scores = {} 
-    
     for det in detections:
         original_track_id = det['track_id']
-        
         if original_track_id not in valid_ids: continue 
 
         clean_id = display_id_map[original_track_id]
@@ -98,17 +91,29 @@ def draw_inference_overlay(img, detections, valid_ids, display_id_map):
 
     return img, frame_scores
 
+def cleanup_files():
+    """Funzione per pulire i file temporanei quando si resetta."""
+    if 'results' in st.session_state and 'video_path' in st.session_state['results']:
+        try:
+            os.remove(st.session_state['results']['video_path'])
+        except: pass
+    if 'results' in st.session_state and 'tracker_config' in st.session_state['results']:
+        try:
+            os.remove(st.session_state['results']['tracker_config'])
+        except: pass
+    # Pulisce lo stato
+    st.session_state['processed'] = False
+    st.session_state['results'] = {}
+
 def process_video_pipeline(video_path, model_path, tracker_config_path, progress_bar, status_text):
-    """Logica principale di elaborazione (Two-Pass)."""
-    
     try:
         model = YOLO(model_path)
     except Exception as e:
         st.error(f"Errore caricamento modello: {e}")
-        return None, None, None
+        return None, None, None, None
 
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened(): return None, None, None
+    if not cap.isOpened(): return None, None, None, None
 
     width, height = int(cap.get(3)), int(cap.get(4))
     fps, total_frames = cap.get(5), int(cap.get(7))
@@ -118,6 +123,7 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
     id_lifespan = defaultdict(int)
     frame_count = 0
 
+    # --- FASE 1: INFERENCE ---
     while True:
         ret, frame = cap.read()
         if not ret: break 
@@ -147,29 +153,31 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
         all_frame_detections.append(current_frame_dets)
         frame_count += 1
         
-        progress = int((frame_count / total_frames) * 50)
-        progress_bar.progress(progress)
+        # BARRA PROGRESSI: Copre 0 -> 100% basandosi SOLO sulla Fase 1
+        if frame_count % 10 == 0:
+            progress = int((frame_count / total_frames) * 100)
+            progress_bar.progress(min(progress, 100))
 
     cap.release()
     del model
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    # --- FILTRAGGIO E RINUMERAZIONE ---
     valid_ids_set = {tid for tid, count in id_lifespan.items() if count >= MIN_TRACK_FRAMES}
     sorted_valid_ids = sorted(list(valid_ids_set))
     display_id_map = {real_id: i+1 for i, real_id in enumerate(sorted_valid_ids)}
 
-    # --- PASS 2: RENDERING ---
-    status_text.text("Fase 2/2: Generazione video annotato e calcolo punteggi...")
+    # --- FASE 2: RENDERING (Senza aggiornare la barra progressi) ---
+    status_text.text("Fase 2/2: Salvataggio video annotato (Attendere)...")
     
-    # Creiamo un file temporaneo per l'output video
     output_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
     output_path = output_temp_file.name
-    output_temp_file.close() # Chiudiamo per permettere a CV2 di scriverci
+    output_temp_file.close()
 
     cap = cv2.VideoCapture(video_path)
-    # Usa 'mp4v' per compatibilità generale, o 'avc1' se disponibile per web
-    fourcc = cv2.VideoWriter_fourcc(*'avc1') 
+    # IMPORTANTE: 'mp4v' è più compatibile con OpenCV locale, ma 'avc1' piace ai browser.
+    # Usiamo 'mp4v' per sicurezza di scrittura, se il browser non lo legge l'utente scarica.
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     polyp_scores_dict = defaultdict(list)
@@ -189,18 +197,13 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
             out.write(annotated_frame)
         else:
             out.write(frame)
-        
         frame_idx += 1
-        # Aggiorna progress bar (50% -> 100%)
-        progress = 50 + int((frame_idx / total_frames) * 50)
-        if progress > 100: progress = 100
-        progress_bar.progress(progress)
 
     cap.release()
     out.release()
     status_text.text("Analisi Completata!")
 
-    # --- METRICHE ---
+    # --- CALCOLO METRICHE ---
     report_data = []
     final_polyp_modes = []
     
@@ -226,109 +229,127 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
     
     return output_path, report_data, final_score, unique_count
 
+# ================= INTERFACCIA =================
 
 st.title("AI-powered Murine Polyp Analysis")
-st.markdown("""
-Analizza video endoscopici murini per rilevare e valutare polipi utilizzando modelli di deep learning avanzati.
-""")
+st.markdown("Analisi video endoscopici murini per rilevare e valutare polipi.")
 
-with st.sidebar:
-    st.header("Impostazioni")
+# Se non abbiamo ancora processato nulla, mostriamo i controlli
+if not st.session_state['processed']:
+    with st.sidebar:
+        st.header("Impostazioni")
+        model_file = st.file_uploader("Carica i pesi del modello (.pt)", type=["pt"])
+        st.info("Default: CRC_murine_best.pt")
+        with st.expander("Avanzate"):
+            conf_thresh = st.slider("Confidence", 0.1, 1.0, DEFAULT_CONF)
+
+    st.subheader("Carica Video Endoscopico")
+    uploaded_video = st.file_uploader("Trascina qui il file .mp4", type=["mp4", "avi", "mov"])
     
-    # 1. Caricamento Modello
-    st.subheader("1. Modello AI (.pt)")
-    model_file = st.file_uploader("Carica i pesi del modello", type=["pt"])
-    
-    st.info("Se non carichi un modello, verrà utilizzato quello predefinito")
+    start_btn = st.button("Avvia Analisi", type="primary", disabled=(uploaded_video is None))
 
-    # 2. Impostazioni Avanzate (opzionali)
-    with st.expander("Parametri Avanzati"):
-        conf_thresh = st.slider("Confidence Threshold", 0.1, 1.0, DEFAULT_CONF)
-        iou_thresh = st.slider("IoU Threshold", 0.1, 1.0, DEFAULT_IOU)
-
-# --- MAIN AREA ---
-
-# 1. Caricamento Video
-st.subheader("Carica Video Endoscopico")
-uploaded_video = st.file_uploader("Trascina qui il file .mp4", type=["mp4", "avi", "mov"])
-
-start_btn = st.button("Avvia Analisi", type="primary", disabled=(uploaded_video is None))
-
-if start_btn and uploaded_video:
-    # Gestione Modello
-    if model_file:
-        tfile_model = tempfile.NamedTemporaryFile(delete=False, suffix='.pt')
-        tfile_model.write(model_file.read())
-        model_path = tfile_model.name
-    elif os.path.exists("CRC_murine_best.pt"):
-        model_path = "CRC_murine_best.pt"
-    else:
-        st.error("ERRORE: Nessun modello caricato e 'CRC_murine_best.pt' non trovato.")
-        st.stop()
-
-    tfile_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile_video.write(uploaded_video.read())
-    video_path = tfile_video.name
-    tfile_video.close() 
-
-    tracker_config = create_compatible_tracker_config()
-
-    prog_bar = st.progress(0)
-    status_txt = st.empty()
-
-    with st.spinner('Elaborazione in corso... Potrebbe richiedere qualche minuto.'):
-        out_video_path, report, final_score, unique_count = process_video_pipeline(
-            video_path, model_path, tracker_config, prog_bar, status_txt
-        )
-
-    if out_video_path:
-        st.success("Elaborazione terminata con successo!")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.metric("Punteggio Video (Worst Score)", f"{final_score}/5")
-        with col2:
-            st.metric("Polipi Unici Rilevati", unique_count)
-
-        st.divider()
-
-        # Mostra Video Risultante
-        st.subheader("Video Annotato")
-        # Nota: I browser a volte hanno problemi con mp4v generati da OpenCV. 
-        # Leggiamo il file e lo passiamo a streamlit
-        with open(out_video_path, 'rb') as v:
-            video_bytes = v.read()
-            st.video(video_bytes)
-        
-        # Download Video
-        st.download_button(
-            label="📥 Scarica Video Annotato",
-            data=video_bytes,
-            file_name=f"analyzed_{uploaded_video.name}",
-            mime="video/mp4"
-        )
-
-        st.divider()
-
-        st.subheader("Dettaglio Polipi Rilevati")
-        if report:
-            df = pd.DataFrame(report)
-            st.dataframe(df, use_container_width=True)
-            
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Scarica Report Excel (CSV)",
-                data=csv,
-                file_name=f"report_{uploaded_video.name}.csv",
-                mime="text/csv",
-            )
+    if start_btn and uploaded_video:
+        # 1. Setup Modello
+        if model_file:
+            tfile_model = tempfile.NamedTemporaryFile(delete=False, suffix='.pt')
+            tfile_model.write(model_file.read())
+            model_path = tfile_model.name
+        elif os.path.exists("CRC_murine_best.pt"):
+            model_path = "CRC_murine_best.pt"
         else:
-            st.warning("Nessun polipo rilevato in modo stabile (> 5 frame).")
+            st.error("ERRORE: Modello non trovato.")
+            st.stop()
 
-    try:
-        os.unlink(video_path)
-        os.unlink(tracker_config)
+        # 2. Setup Video Input
+        tfile_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        tfile_video.write(uploaded_video.read())
+        video_path_input = tfile_video.name
+        tfile_video.close() 
+
+        # 3. Setup Tracker
+        tracker_config = create_compatible_tracker_config()
+
+        # 4. UI Feedback
+        prog_bar = st.progress(0)
+        status_txt = st.empty()
+
+        # 5. Esecuzione
+        with st.spinner('Elaborazione in corso...'):
+            out_path, report, score, count = process_video_pipeline(
+                video_path_input, model_path, tracker_config, prog_bar, status_txt
+            )
+        
+        # 6. Salvataggio Risultati in Session State
+        if out_path:
+            st.session_state['results'] = {
+                'video_path': out_path,
+                'report': report,
+                'score': score,
+                'count': count,
+                'tracker_config': tracker_config,
+                'input_video_temp': video_path_input,
+                'original_name': uploaded_video.name
+            }
+            st.session_state['processed'] = True
+            st.rerun() # Ricarica la pagina per mostrare i risultati
+
+# SE ABBIAMO PROCESSATO, MOSTRIAMO SOLO I RISULTATI
+else:
+    res = st.session_state['results']
     
-    except:
-        pass
+    st.success("✅ Elaborazione Completata!")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Worst Polyp Score", f"{res['score']}/5")
+    with col2:
+        st.metric("Polipi Unici", res['count'])
+
+    st.divider()
+
+    st.subheader("Video Annotato")
+    
+    # Leggiamo il file dal disco
+    if os.path.exists(res['video_path']):
+        with open(res['video_path'], 'rb') as v:
+            video_bytes = v.read()
+        
+        # Proviamo a mostrarlo (potrebbe non andare su alcuni browser senza ffmpeg)
+        st.video(video_bytes)
+        
+        # DOWNLOAD BUTTON (Ora funziona perché video_bytes è caricato dallo stato)
+        st.download_button(
+            label="📥 SCARICA VIDEO ANNOTATO",
+            data=video_bytes,
+            file_name=f"analyzed_{res['original_name']}",
+            mime="video/mp4",
+            type="primary"
+        )
+    else:
+        st.error("Errore: Il file video sembra essere stato rimosso.")
+
+    st.divider()
+
+    if res['report']:
+        df = pd.DataFrame(res['report'])
+        st.dataframe(df, use_container_width=True)
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Scarica Report CSV",
+            data=csv,
+            file_name=f"report_{res['original_name']}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.warning("Nessun polipo rilevato.")
+
+    st.divider()
+    
+    # PULSANTE RESET
+    if st.button("🔄 Nuova Analisi (Cancella file temp)"):
+        # Cancella file input
+        try: os.remove(res['input_video_temp'])
+        except: pass
+        # Cancella file output e config
+        cleanup_files()
+        st.rerun()
