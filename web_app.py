@@ -232,7 +232,7 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
 # ================= INTERFACCIA =================
 
 st.title("AI-powered Murine Polyp Analysis")
-st.markdown("Analisi video endoscopici murini per rilevare e valutare polipi.")
+st.markdown("Analisi video endoscopici murini per rilevare e valutare lesioni polipoidi.")
 
 # Se non abbiamo ancora processato nulla, mostriamo i controlli
 if not st.session_state['processed']:
@@ -245,9 +245,22 @@ if not st.session_state['processed']:
 
     st.subheader("Carica Video Endoscopico")
     uploaded_video = st.file_uploader("Trascina qui il file .mp4", type=["mp4", "avi", "mov"])
+    st.info("Si consiglia di non caricare video superiori ai 15MB. Alternativamente scaricare il modello e usare localmente.")
     
     start_btn = st.button("Avvia Analisi", type="primary", disabled=(uploaded_video is None))
+    filename = 'model.zip'
 
+    with open(filename, "rb") as f:
+        file_bytes = f.read()
+
+    # 2. Passa i byte letti al bottone
+    st.download_button(
+        label="Scarica modello",
+        data=file_bytes,          
+        file_name=filename,       
+        mime="application/zip",    
+        type="secondary"
+    )
     if start_btn and uploaded_video:
         # 1. Setup Modello
         if model_file:
@@ -314,12 +327,10 @@ else:
         with open(res['video_path'], 'rb') as v:
             video_bytes = v.read()
         
-        # Proviamo a mostrarlo (potrebbe non andare su alcuni browser senza ffmpeg)
-        st.video(video_bytes)
         
         # DOWNLOAD BUTTON (Ora funziona perché video_bytes è caricato dallo stato)
         st.download_button(
-            label="📥 SCARICA VIDEO ANNOTATO",
+            label="Scarica Video Annotato ",
             data=video_bytes,
             file_name=f"analyzed_{res['original_name']}",
             mime="video/mp4",
@@ -335,7 +346,7 @@ else:
         st.dataframe(df, use_container_width=True)
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Scarica Report CSV",
+            label="Scarica Report CSV",
             data=csv,
             file_name=f"report_{res['original_name']}.csv",
             mime="text/csv",
@@ -346,7 +357,7 @@ else:
     st.divider()
     
     # PULSANTE RESET
-    if st.button("🔄 Nuova Analisi (Cancella file temp)"):
+    if st.button("🔄 Nuova Analisi"):
         # Cancella file input
         try: os.remove(res['input_video_temp'])
         except: pass
