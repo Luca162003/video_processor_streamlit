@@ -14,16 +14,14 @@ from ultralytics import YOLO
 
 st.set_page_config(page_title="AI-powered Murine Polyp Analysis", layout="wide", page_icon=':mouse:')
 
-# --- GESTIONE STATO SESSIONE (Fondamentale per il download) ---
 if 'processed' not in st.session_state:
     st.session_state['processed'] = False
 if 'results' not in st.session_state:
     st.session_state['results'] = {}
 
-# Parametri di Default
 DEFAULT_CONF = 0.5
 DEFAULT_IOU = 0.5
-IMG_SIZE = 640 # O 352 se vuoi velocità
+IMG_SIZE = 640 
 MIN_TRACK_FRAMES = 5
 TRACK_BUFFER = 10
 MATCH_THRESH = 0.85
@@ -93,14 +91,19 @@ def draw_inference_overlay(img, detections, valid_ids, display_id_map):
 
 def cleanup_files():
     """Funzione per pulire i file temporanei quando si resetta."""
-    if 'results' in st.session_state and 'video_path' in st.session_state['results']:
-        try:
-            os.remove(st.session_state['results']['video_path'])
-        except: pass
-    if 'results' in st.session_state and 'tracker_config' in st.session_state['results']:
-        try:
-            os.remove(st.session_state['results']['tracker_config'])
-        except: pass
+    files_to_clean = [
+        st.session_state.get('results', {}).get('video_path'),
+        st.session_state.get('results', {}).get('tracker_config'),
+        st.session_state.get('results', {}).get('input_video_temp'),
+        st.session_state.get('model_temp_path')  # Add this to track uploaded models
+    ]
+    for filepath in files_to_clean:
+        if filepath and os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass  # Silent fail for temp files
+    
     # Pulisce lo stato
     st.session_state['processed'] = False
     st.session_state['results'] = {}
@@ -153,7 +156,6 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
         all_frame_detections.append(current_frame_dets)
         frame_count += 1
         
-        # BARRA PROGRESSI: Copre 0 -> 100% basandosi SOLO sulla Fase 1
         if frame_count % 10 == 0:
             progress = int((frame_count / total_frames) * 100)
             progress_bar.progress(min(progress, 100))
@@ -175,9 +177,8 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
     output_temp_file.close()
 
     cap = cv2.VideoCapture(video_path)
-    # IMPORTANTE: 'mp4v' è più compatibile con OpenCV locale, ma 'avc1' piace ai browser.
-    # Usiamo 'mp4v' per sicurezza di scrittura, se il browser non lo legge l'utente scarica.
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+
+    fourcc = cv2.VideoWriter_fourcc(*'avc1') 
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     polyp_scores_dict = defaultdict(list)
@@ -267,6 +268,7 @@ if not st.session_state['processed']:
             tfile_model = tempfile.NamedTemporaryFile(delete=False, suffix='.pt')
             tfile_model.write(model_file.read())
             model_path = tfile_model.name
+            st.session_state['model_temp_path'] = tfile_model.name
         elif os.path.exists("CRC_murine_best.pt"):
             model_path = "CRC_murine_best.pt"
         else:
@@ -321,7 +323,7 @@ else:
     st.divider()
 
     st.subheader("Video Annotato")
-    
+    st.video(res['video_path'])
     # Leggiamo il file dal disco
     if os.path.exists(res['video_path']):
         with open(res['video_path'], 'rb') as v:
