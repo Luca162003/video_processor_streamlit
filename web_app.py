@@ -178,7 +178,7 @@ def process_video_pipeline(video_path, model_path, tracker_config_path, progress
 
     cap = cv2.VideoCapture(video_path)
 
-    fourcc = cv2.VideoWriter_fourcc(*'avc1') 
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     polyp_scores_dict = defaultdict(list)
