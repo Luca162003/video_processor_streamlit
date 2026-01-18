@@ -323,7 +323,6 @@ else:
     st.divider()
 
     st.subheader("Video Annotato")
-    st.video(res['video_path'])
     # Leggiamo il file dal disco
     if os.path.exists(res['video_path']):
         with open(res['video_path'], 'rb') as v:
